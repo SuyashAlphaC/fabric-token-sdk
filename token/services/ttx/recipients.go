@@ -269,11 +269,28 @@ func (f *RequestRecipientIdentityView) callWithRecipientData(context view.Contex
 	}
 
 	logger.DebugfContext(context.Context(), "Receive identity response")
-	recipientData := &RecipientData{}
-	err = session.ReceiveWithTimeout(recipientData, 10*time.Second)
+	response := &RecipientData{}
+	err = session.ReceiveWithTimeout(response, 10*time.Second)
 	if err != nil {
 		return nil, errors.Wrapf(err, "failed to unmarshal recipient data")
 	}
+
+	// On the echo path the responder returns only Identity as an acknowledgement;
+	// reuse the locally-supplied RecipientData for registration so we don't depend
+	// on AuditInfo/TokenMetadata being re-sent over the wire.
+	var recipientData *RecipientData
+	if recipient.RecipientData != nil {
+		if len(response.Identity) != 0 && !response.Identity.Equal(recipient.RecipientData.Identity) {
+			return nil, errors.Errorf(
+				"recipient ack identity [%s] does not match requested [%s]",
+				response.Identity, recipient.RecipientData.Identity,
+			)
+		}
+		recipientData = recipient.RecipientData
+	} else {
+		recipientData = response
+	}
+
 	tms, err := token.GetManagementService(context, token.WithTMSID(f.TMSID))
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to get token management service")
@@ -444,9 +461,13 @@ func (s *RespondRequestRecipientIdentityView) Call(context view.Context) (interf
 
 	var recipientData *RecipientData
 	var recipientIdentity view.Identity
-	// if the initiator send a recipient data, check that the identity has been already registered locally.
-	if recipientRequest.RecipientData != nil {
-		// check it exists and return it back
+	// echoPath is true when the initiator supplied a RecipientData to echo back,
+	// in which case the responder only needs to acknowledge the identity rather
+	// than re-ship the full RecipientData payload.
+	echoPath := recipientRequest.RecipientData != nil
+	if echoPath {
+		// the initiator already has the full RecipientData; we only need to verify
+		// the identity is registered locally and acknowledge with a slim response.
 		recipientData = recipientRequest.RecipientData
 		recipientIdentity = recipientData.Identity
 		if !w.Contains(context.Context(), recipientIdentity) {
@@ -473,8 +494,16 @@ func (s *RespondRequestRecipientIdentityView) Call(context view.Context) (interf
 		return nil, errors.Wrapf(err, "failed to bind me to recipient identity")
 	}
 
+	// Send the response back to the invoker.
+	// On the echo path we send only the bare Identity so the initiator can verify
+	// the responder acknowledged the same identity it asked about, without
+	// re-shipping AuditInfo/TokenMetadata fields the initiator already holds.
+	response := recipientData
+	if echoPath {
+		response = &RecipientData{Identity: recipientIdentity}
+	}
 	logger.DebugfContext(context.Context(), "Send recipient identity response to %s", session.Info().Caller)
-	if err := session.Send(recipientData); err != nil {
+	if err := session.Send(response); err != nil {
 		return nil, errors.Wrapf(err, "failed to send recipient data")
 	}
 

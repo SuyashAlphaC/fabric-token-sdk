@@ -79,10 +79,10 @@ Wire messages use JSON sessions (`token/services/utils/json/session`); the diagr
 
 **Response paths (today).** In `RespondRequestRecipientIdentityView`, after the wallet lookup:
 
-- If `recipientRequest.RecipientData != nil`, the responder checks `OwnerWallet.Contains` for `RecipientData.Identity`, then sends **the same** `RecipientData` value back on the session (echo path). The responder does **not** substitute wallet-held `AuditInfo` / metadata into that payload; what goes on the wire is the initiator-supplied structure (after the contains check).
-- If `recipientRequest.RecipientData == nil`, the responder calls `OwnerWallet.GetRecipientData` and sends that **wallet-produced** `RecipientData` (fresh path).
+- If `recipientRequest.RecipientData != nil` (echo path), the responder checks `OwnerWallet.Contains` for `RecipientData.Identity`, then sends back a **slim acknowledgement** on the session: a `RecipientData` value that carries only the `Identity` field (with `AuditInfo`, `TokenMetadata`, `TokenMetadataAuditInfo` left nil). The initiator already holds the full structure it sent in the request, so the wire only needs to confirm which identity was acknowledged.
+- If `recipientRequest.RecipientData == nil` (fresh path), the responder calls `OwnerWallet.GetRecipientData` and sends that wallet-produced `RecipientData` with all four fields populated.
 
-In both cases the initiator receives a full `RecipientData` over the wire. The initiator then calls `WalletManager.RegisterRecipientIdentity` with that payload and updates the endpoint resolver. **Protocol hardening** may replace full-object responses with a minimal acknowledgement (or another minimal wire type) so the responder does not ship an entire `RecipientData` when a slimmer response suffices; that is a separate code change from this documentation.
+On the initiator side, `RequestRecipientIdentityView.callWithRecipientData` distinguishes the two paths: when it supplied a `RecipientData` in the request, it verifies the responder's ack `Identity` matches what was sent and then calls `WalletManager.RegisterRecipientIdentity` with its **local** copy; when it did not supply data, it registers the full `RecipientData` received from the responder. In both cases the endpoint resolver is then updated.
 
 **Multisig.** When `RecipientRequest.MultiSig` is true, the initiator may send an additional `MultisigRecipientData` after the first exchange; the responder registers identities and updates bindings as in code.
 
@@ -108,12 +108,21 @@ sequenceDiagram
         end
         R->>R: endpoint.Bind(context.Me, RecipientData.Identity)
         Note over R,I: Bind before send so local resolver wiring fails before the peer receives RecipientData
-        R-->>I: RecipientData (echo or fresh data path)
+        alt echo path (RecipientData was supplied)
+            R-->>I: RecipientData{Identity} (slim ack)
+        else fresh path
+            R-->>I: RecipientData{Identity, AuditInfo, TokenMetadata, TokenMetadataAuditInfo}
+        end
     end
 
     rect rgba(240, 255, 240, 0.45)
         Note over I,R: Phase 3 - Initiator registration and bindings
-        I->>I: RegisterRecipientIdentity(RecipientData)
+        alt echo path
+            I->>I: Verify ack.Identity matches sent Identity
+            I->>I: RegisterRecipientIdentity(local RecipientData)
+        else fresh path
+            I->>I: RegisterRecipientIdentity(received RecipientData)
+        end
         I->>I: endpoint.Bind(requested FSC identity, RecipientData.Identity)
     end
 
@@ -126,7 +135,7 @@ sequenceDiagram
         end
     end
 
-    Note over I,R: Full RecipientData on wire today (echo of request vs wallet-generated)
+    Note over I,R: Echo path now ships a slim ack (Identity only); fresh path ships full RecipientData
 ```
 
 #### `ExchangeRecipientIdentitiesView` / `RespondExchangeRecipientIdentitiesView`

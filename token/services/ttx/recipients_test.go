@@ -150,6 +150,26 @@ func TestGetRecipientData(t *testing.T) {
 	})
 }
 
+func TestRecipientData_SlimAckRoundTrip(t *testing.T) {
+	// Echo-path responses carry only Identity; AuditInfo/TokenMetadata fields
+	// remain nil to slim the wire payload. Verify the JSON marshalling preserves
+	// this shape so old peers receiving a slim ack do not interpret missing
+	// fields as having explicit zero-byte values.
+	original := &RecipientData{Identity: view.Identity("alice")}
+
+	raw, err := Marshal(original)
+	require.NoError(t, err)
+	require.NotEmpty(t, raw)
+
+	decoded := &RecipientData{}
+	require.NoError(t, Unmarshal(raw, decoded))
+
+	assert.Equal(t, original.Identity, decoded.Identity)
+	assert.Nil(t, decoded.AuditInfo)
+	assert.Nil(t, decoded.TokenMetadata)
+	assert.Nil(t, decoded.TokenMetadataAuditInfo)
+}
+
 func TestGetRecipientWalletID(t *testing.T) {
 	t.Run("nil params map returns empty string", func(t *testing.T) {
 		opts := &token.ServiceOptions{}
